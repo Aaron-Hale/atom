@@ -1,0 +1,105 @@
+openapi: 3.1.0
+info:
+  title: ATOM Evidence Retrieval API
+  version: 0.1.0
+  description: Local-first API for strict evidence-span retrieval over CUAD.
+servers:
+  - url: http://127.0.0.1:8000
+paths:
+  /v1/retrieve:
+    post:
+      summary: Retrieve ranked evidence spans for a clause query
+      operationId: retrieveEvidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetrieveRequest'
+      responses:
+        '200':
+          description: Successful retrieval
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrieveResponse'
+        '400':
+          description: Invalid query or mode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    RetrieveRequest:
+      type: object
+      required: [query, mode]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: Clause query text.
+        mode:
+          type: string
+          enum: [vector_only, base_reranker, lora_reranker]
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 100
+        top_n:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 10
+    EvidenceResult:
+      type: object
+      required: [doc_id, chunk_id, start, end, quote, score]
+      properties:
+        doc_id:
+          type: string
+        chunk_id:
+          type: string
+        start:
+          type: integer
+          minimum: 0
+        end:
+          type: integer
+          minimum: 1
+        quote:
+          type: string
+          minLength: 1
+        score:
+          type: number
+          format: float
+        provenance:
+          type: object
+          additionalProperties: true
+          description: Optional traceability metadata.
+    RetrieveResponse:
+      type: object
+      required: [query, mode, results]
+      properties:
+        query:
+          type: string
+        mode:
+          type: string
+          enum: [vector_only, base_reranker, lora_reranker]
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceResult'
+        constraints:
+          type: object
+          properties:
+            quote_must_match_offsets:
+              type: boolean
+              const: true
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
