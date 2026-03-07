@@ -25,3 +25,9 @@
 - Saved faiss.index and chunk metadata mapping for deterministic top-K retrieval.
 - Implemented a retrieval service that returns scored chunk candidates with exact metadata.
 - Remaining blocker: need a deterministic eval set and baseline retrieval report for Day 7.
+
+## Day 7
+- Built a deterministic baseline eval set from exported CUAD labels using contract-aware title cues.
+- Implemented overlap-based vector retrieval evaluation using hit@K and Recall@K.
+- Wrote a baseline retrieval report with overall metrics, per-clause breakdowns, and failure examples.
+- Remaining blocker: need an off-the-shelf reranker baseline for Day 8.
