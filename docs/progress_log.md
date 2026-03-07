@@ -19,3 +19,9 @@
 - Produced chunks.jsonl with exact start/end offsets and deterministic chunk IDs.
 - Added tests proving chunk text exactly matches the original document slice and stays within bounds.
 - Remaining blocker: need retrieval indexing on top of chunk metadata for Day 6.
+
+## Day 6
+- Built a local embedding + FAISS retrieval baseline over chunked CUAD contracts.
+- Saved faiss.index and chunk metadata mapping for deterministic top-K retrieval.
+- Implemented a retrieval service that returns scored chunk candidates with exact metadata.
+- Remaining blocker: need a deterministic eval set and baseline retrieval report for Day 7.
