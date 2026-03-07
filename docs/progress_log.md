@@ -6,3 +6,10 @@
 - Verified Codex can read and minimally refine the project-local skill and template.
 - Fixed `.gitignore` so the project-local Codex skill is tracked in Git while keeping local environment artifacts ignored.
 - Remaining blocker: eval scripts and reports do not exist yet, so the skill currently defines workflow and acceptance criteria.
+
+## Day 4
+- Implemented deterministic CUAD export into canonical contract and label stores.
+- Loaded real CUAD data by default from Hugging Face, with optional local JSON override.
+- Produced non-empty contracts.jsonl and labels.jsonl with stable doc IDs and preserved span offsets.
+- Tightened clause normalization and updated the selected taxonomy to match clauses actually present in the source dataset.
+- Remaining blocker: verify exported span quality manually before chunking on Day 5.
