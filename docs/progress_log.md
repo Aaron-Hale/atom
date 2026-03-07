@@ -1,0 +1,8 @@
+
+## Day 3
+- Added a project-local Codex skill for retrieval evaluation under `.codex/skills/retrieval-eval/`.
+- Added a reusable markdown report template for ATOM retrieval experiments over CUAD.
+- Established repo-specific rules that prevent declaring success without numeric metrics and written reports.
+- Verified Codex can read and minimally refine the project-local skill and template.
+- Fixed `.gitignore` so the project-local Codex skill is tracked in Git while keeping local environment artifacts ignored.
+- Remaining blocker: eval scripts and reports do not exist yet, so the skill currently defines workflow and acceptance criteria.

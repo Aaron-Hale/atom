@@ -1,4 +1,7 @@
-.codex/
+.codex/*
+!.codex/skills/
+!.codex/skills/**
+
 .venv/
 __pycache__/
 .pytest_cache/
