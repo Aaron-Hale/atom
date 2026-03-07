@@ -13,3 +13,9 @@
 - Produced non-empty contracts.jsonl and labels.jsonl with stable doc IDs and preserved span offsets.
 - Tightened clause normalization and updated the selected taxonomy to match clauses actually present in the source dataset.
 - Remaining blocker: verify exported span quality manually before chunking on Day 5.
+
+## Day 5
+- Implemented deterministic offset-preserving chunking for exported CUAD contracts.
+- Produced chunks.jsonl with exact start/end offsets and deterministic chunk IDs.
+- Added tests proving chunk text exactly matches the original document slice and stays within bounds.
+- Remaining blocker: need retrieval indexing on top of chunk metadata for Day 6.
