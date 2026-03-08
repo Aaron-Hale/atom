@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Day 8 retrieval eval with vector-only vs base-reranker comparison."""
+"""Run retrieval eval with vector-only, base reranker, and LoRA reranker modes."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from app.services.rerank import BaseReranker
+from app.services.rerank import BaseReranker, LoraReranker
 
 
 @dataclass(frozen=True)
@@ -41,8 +41,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metadata", type=Path, default=Path("data/chunk_metadata.jsonl"))
     parser.add_argument("--report", type=Path, default=Path("docs/report_rerank_baseline.md"))
     parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
-    parser.add_argument("--reranker", choices=["none", "base"], default="none")
+    parser.add_argument("--reranker", choices=["none", "base", "lora"], default="none")
     parser.add_argument("--reranker-model", default="cross-encoder/ms-marco-MiniLM-L6-v2")
+    parser.add_argument("--lora-adapter", type=Path, default=Path("models/reranker_lora"))
     parser.add_argument("--rerank-candidates", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--top-k", type=int, nargs="+", default=[1, 3, 5, 10])
@@ -135,10 +136,10 @@ def retrieve_vector_candidates(
     return all_ranked
 
 
-def apply_base_reranker(
+def apply_reranker(
     eval_items: list[dict[str, object]],
     vector_rankings: list[list[dict[str, object]]],
-    reranker: BaseReranker,
+    reranker: Any,
     top_k: int,
     batch_size: int,
 ) -> list[list[dict[str, object]]]:
@@ -344,27 +345,31 @@ def write_report(
     eval_size: int,
     sample_question: str,
     vector_result: EvalResult,
-    rerank_result: EvalResult | None,
-    helped_examples: list[dict[str, object]],
-    regressed_examples: list[dict[str, object]],
+    base_result: EvalResult | None,
+    lora_result: EvalResult | None,
+    base_helped_examples: list[dict[str, object]],
+    base_regressed_examples: list[dict[str, object]],
+    lora_helped_examples: list[dict[str, object]],
+    lora_regressed_examples: list[dict[str, object]],
 ) -> None:
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     top_k_values = sorted(args.top_k)
 
     lines: list[str] = []
-    lines.append("# Rerank Baseline Report (Day 8)")
+    lines.append("# Reranker Evaluation Report")
     lines.append("")
     lines.append("## Experiment")
     lines.append(f"- Generated: {generated}")
-    lines.append("- Purpose: compare vector-only retrieval vs vector + base cross-encoder reranking")
+    lines.append("- Purpose: compare vector-only retrieval against base and LoRA reranker modes")
     lines.append(f"- Eval set: `{args.evalset}`")
     lines.append(f"- Eval items: {eval_size}")
     lines.append(f"- Index: `{args.index}`")
     lines.append(f"- Metadata: `{args.metadata}`")
     lines.append(f"- Vector encoder: `{args.model}`")
     lines.append(f"- Reranker mode: `{args.reranker}`")
-    if rerank_result is not None:
-        lines.append(f"- Base reranker: `{args.reranker_model}`")
+    if args.reranker != "none":
+        lines.append(f"- Reranker backbone: `{args.reranker_model}`")
+        lines.append(f"- LoRA adapter path: `{args.lora_adapter}`")
         lines.append(f"- Rerank candidate pool: top {args.rerank_candidates} vector candidates")
     lines.append(f"- Top-K: {top_k_values}")
     lines.append(
@@ -377,7 +382,7 @@ def write_report(
 
     lines.append("## Overall Metrics")
     lines.append("")
-    if rerank_result is None:
+    if base_result is None and lora_result is None:
         lines.append("| Metric | " + " | ".join([f"@{k}" for k in top_k_values]) + " |")
         lines.append("| --- | " + " | ".join(["---"] * len(top_k_values)) + " |")
         lines.append(
@@ -391,23 +396,49 @@ def write_report(
             + " |"
         )
     else:
-        lines.append(
-            "| K | Vector Hit@K | Base Hit@K | Delta | Vector Recall@K | Base Recall@K | Delta |"
-        )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        if base_result is not None and lora_result is not None:
+            lines.append(
+                "| K | Vec Hit@K | Base Hit@K | LoRA Hit@K | dBase | dLoRA | Vec Rec@K | Base Rec@K | LoRA Rec@K | dBase | dLoRA |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        elif base_result is not None:
+            lines.append(
+                "| K | Vector Hit@K | Base Hit@K | Delta | Vector Recall@K | Base Recall@K | Delta |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        else:
+            lines.append(
+                "| K | Vector Hit@K | LoRA Hit@K | Delta | Vector Recall@K | LoRA Recall@K | Delta |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for k in top_k_values:
             v_hit = vector_result.overall[k]["hit_at_k"]
-            r_hit = rerank_result.overall[k]["hit_at_k"]
             v_rec = vector_result.overall[k]["recall_at_k"]
-            r_rec = rerank_result.overall[k]["recall_at_k"]
-            lines.append(
-                f"| {k} | {v_hit:.4f} | {r_hit:.4f} | {r_hit - v_hit:+.4f} | {v_rec:.4f} | {r_rec:.4f} | {r_rec - v_rec:+.4f} |"
-            )
+            if base_result is not None and lora_result is not None:
+                b_hit = base_result.overall[k]["hit_at_k"]
+                l_hit = lora_result.overall[k]["hit_at_k"]
+                b_rec = base_result.overall[k]["recall_at_k"]
+                l_rec = lora_result.overall[k]["recall_at_k"]
+                lines.append(
+                    f"| {k} | {v_hit:.4f} | {b_hit:.4f} | {l_hit:.4f} | {b_hit - v_hit:+.4f} | {l_hit - v_hit:+.4f} | {v_rec:.4f} | {b_rec:.4f} | {l_rec:.4f} | {b_rec - v_rec:+.4f} | {l_rec - v_rec:+.4f} |"
+                )
+            elif base_result is not None:
+                b_hit = base_result.overall[k]["hit_at_k"]
+                b_rec = base_result.overall[k]["recall_at_k"]
+                lines.append(
+                    f"| {k} | {v_hit:.4f} | {b_hit:.4f} | {b_hit - v_hit:+.4f} | {v_rec:.4f} | {b_rec:.4f} | {b_rec - v_rec:+.4f} |"
+                )
+            else:
+                l_hit = lora_result.overall[k]["hit_at_k"]  # type: ignore[index]
+                l_rec = lora_result.overall[k]["recall_at_k"]  # type: ignore[index]
+                lines.append(
+                    f"| {k} | {v_hit:.4f} | {l_hit:.4f} | {l_hit - v_hit:+.4f} | {v_rec:.4f} | {l_rec:.4f} | {l_rec - v_rec:+.4f} |"
+                )
 
     lines.append("")
     lines.append("## Per-Clause Metrics")
     lines.append("")
-    if rerank_result is None:
+    if base_result is None and lora_result is None:
         lines.append("| Clause | N | " + " | ".join([f"Hit@{k} | Recall@{k}" for k in top_k_values]) + " |")
         lines.append("| --- | --- | " + " | ".join(["--- | ---"] * len(top_k_values)) + " |")
         for clause_type, clause_metrics in vector_result.by_clause.items():
@@ -418,72 +449,165 @@ def write_report(
                 row.append(f"{clause_metrics[k]['recall_at_k']:.4f}")
             lines.append("| " + " | ".join(row) + " |")
     else:
-        lines.append(
-            "| Clause | N | "
-            + " | ".join(
-                [
-                    f"Hit@{k} Vec | Hit@{k} Base | dHit@{k} | Rec@{k} Vec | Rec@{k} Base | dRec@{k}"
-                    for k in top_k_values
-                ]
+        if base_result is not None and lora_result is not None:
+            lines.append(
+                "| Clause | N | "
+                + " | ".join(
+                    [
+                        f"Hit@{k} Vec | Hit@{k} Base | Hit@{k} LoRA | dBase | dLoRA | Rec@{k} Vec | Rec@{k} Base | Rec@{k} LoRA | dBase | dLoRA"
+                        for k in top_k_values
+                    ]
+                )
+                + " |"
             )
-            + " |"
-        )
-        lines.append("| --- | --- | " + " | ".join(["--- | --- | --- | --- | --- | ---"] * len(top_k_values)) + " |")
+            lines.append(
+                "| --- | --- | "
+                + " | ".join(
+                    ["--- | --- | --- | --- | --- | --- | --- | --- | --- | ---"] * len(top_k_values)
+                )
+                + " |"
+            )
+        elif base_result is not None:
+            lines.append(
+                "| Clause | N | "
+                + " | ".join(
+                    [
+                        f"Hit@{k} Vec | Hit@{k} Base | dHit@{k} | Rec@{k} Vec | Rec@{k} Base | dRec@{k}"
+                        for k in top_k_values
+                    ]
+                )
+                + " |"
+            )
+            lines.append("| --- | --- | " + " | ".join(["--- | --- | --- | --- | --- | ---"] * len(top_k_values)) + " |")
+        else:
+            lines.append(
+                "| Clause | N | "
+                + " | ".join(
+                    [
+                        f"Hit@{k} Vec | Hit@{k} LoRA | dHit@{k} | Rec@{k} Vec | Rec@{k} LoRA | dRec@{k}"
+                        for k in top_k_values
+                    ]
+                )
+                + " |"
+            )
+            lines.append("| --- | --- | " + " | ".join(["--- | --- | --- | --- | --- | ---"] * len(top_k_values)) + " |")
         for clause_type in sorted(vector_result.by_clause):
             vec_clause = vector_result.by_clause[clause_type]
-            rr_clause = rerank_result.by_clause[clause_type]
             n = int(vec_clause[top_k_values[0]]["count"])
             row = [clause_type, str(n)]
             for k in top_k_values:
                 vec_hit = vec_clause[k]["hit_at_k"]
-                rr_hit = rr_clause[k]["hit_at_k"]
                 vec_rec = vec_clause[k]["recall_at_k"]
-                rr_rec = rr_clause[k]["recall_at_k"]
-                row.append(f"{vec_hit:.4f}")
-                row.append(f"{rr_hit:.4f}")
-                row.append(f"{rr_hit - vec_hit:+.4f}")
-                row.append(f"{vec_rec:.4f}")
-                row.append(f"{rr_rec:.4f}")
-                row.append(f"{rr_rec - vec_rec:+.4f}")
+                if base_result is not None and lora_result is not None:
+                    b_clause = base_result.by_clause[clause_type]
+                    l_clause = lora_result.by_clause[clause_type]
+                    b_hit = b_clause[k]["hit_at_k"]
+                    l_hit = l_clause[k]["hit_at_k"]
+                    b_rec = b_clause[k]["recall_at_k"]
+                    l_rec = l_clause[k]["recall_at_k"]
+                    row.append(f"{vec_hit:.4f}")
+                    row.append(f"{b_hit:.4f}")
+                    row.append(f"{l_hit:.4f}")
+                    row.append(f"{b_hit - vec_hit:+.4f}")
+                    row.append(f"{l_hit - vec_hit:+.4f}")
+                    row.append(f"{vec_rec:.4f}")
+                    row.append(f"{b_rec:.4f}")
+                    row.append(f"{l_rec:.4f}")
+                    row.append(f"{b_rec - vec_rec:+.4f}")
+                    row.append(f"{l_rec - vec_rec:+.4f}")
+                elif base_result is not None:
+                    b_clause = base_result.by_clause[clause_type]
+                    b_hit = b_clause[k]["hit_at_k"]
+                    b_rec = b_clause[k]["recall_at_k"]
+                    row.append(f"{vec_hit:.4f}")
+                    row.append(f"{b_hit:.4f}")
+                    row.append(f"{b_hit - vec_hit:+.4f}")
+                    row.append(f"{vec_rec:.4f}")
+                    row.append(f"{b_rec:.4f}")
+                    row.append(f"{b_rec - vec_rec:+.4f}")
+                else:
+                    l_clause = lora_result.by_clause[clause_type]  # type: ignore[index]
+                    l_hit = l_clause[k]["hit_at_k"]
+                    l_rec = l_clause[k]["recall_at_k"]
+                    row.append(f"{vec_hit:.4f}")
+                    row.append(f"{l_hit:.4f}")
+                    row.append(f"{l_hit - vec_hit:+.4f}")
+                    row.append(f"{vec_rec:.4f}")
+                    row.append(f"{l_rec:.4f}")
+                    row.append(f"{l_rec - vec_rec:+.4f}")
             lines.append("| " + " | ".join(row) + " |")
 
     lines.append("")
     lines.append("## Comparison Examples")
     lines.append("")
-    if rerank_result is None:
+    if base_result is None and lora_result is None:
         lines.append("Reranker disabled; no vector-vs-reranker comparison examples.")
     else:
-        lines.append("### Cases Where Reranking Helped")
-        if not helped_examples:
-            lines.append("No helped examples found in this run.")
-        else:
-            for idx, example in enumerate(helped_examples, start=1):
-                lines.append(f"#### Helped {idx}: `{example['id']}`")
-                lines.append(f"- Clause: `{example['clause_type']}`")
-                lines.append(f"- Doc: `{example['doc_id']}`")
-                lines.append(f"- Question: {example['question']}")
-                lines.append(f"- Expected spans: {example['expected_spans']}")
-                lines.append("- Vector top chunks:")
-                write_top_chunks(lines, example["vector_top"])
-                lines.append("- Base-reranked top chunks:")
-                write_top_chunks(lines, example["rerank_top"])
-                lines.append("")
+        if base_result is not None:
+            lines.append("### Base: Cases Where Reranking Helped")
+            if not base_helped_examples:
+                lines.append("No base helped examples found in this run.")
+            else:
+                for idx, example in enumerate(base_helped_examples, start=1):
+                    lines.append(f"#### Base Helped {idx}: `{example['id']}`")
+                    lines.append(f"- Clause: `{example['clause_type']}`")
+                    lines.append(f"- Doc: `{example['doc_id']}`")
+                    lines.append(f"- Question: {example['question']}")
+                    lines.append(f"- Expected spans: {example['expected_spans']}")
+                    lines.append("- Vector top chunks:")
+                    write_top_chunks(lines, example["vector_top"])
+                    lines.append("- Base-reranked top chunks:")
+                    write_top_chunks(lines, example["rerank_top"])
+                    lines.append("")
 
-        lines.append("### Cases Where Reranking Failed")
-        if not regressed_examples:
-            lines.append("No regressed examples found in this run.")
-        else:
-            for idx, example in enumerate(regressed_examples, start=1):
-                lines.append(f"#### Regressed {idx}: `{example['id']}`")
-                lines.append(f"- Clause: `{example['clause_type']}`")
-                lines.append(f"- Doc: `{example['doc_id']}`")
-                lines.append(f"- Question: {example['question']}")
-                lines.append(f"- Expected spans: {example['expected_spans']}")
-                lines.append("- Vector top chunks:")
-                write_top_chunks(lines, example["vector_top"])
-                lines.append("- Base-reranked top chunks:")
-                write_top_chunks(lines, example["rerank_top"])
-                lines.append("")
+            lines.append("### Base: Cases Where Reranking Failed")
+            if not base_regressed_examples:
+                lines.append("No base regressed examples found in this run.")
+            else:
+                for idx, example in enumerate(base_regressed_examples, start=1):
+                    lines.append(f"#### Base Regressed {idx}: `{example['id']}`")
+                    lines.append(f"- Clause: `{example['clause_type']}`")
+                    lines.append(f"- Doc: `{example['doc_id']}`")
+                    lines.append(f"- Question: {example['question']}")
+                    lines.append(f"- Expected spans: {example['expected_spans']}")
+                    lines.append("- Vector top chunks:")
+                    write_top_chunks(lines, example["vector_top"])
+                    lines.append("- Base-reranked top chunks:")
+                    write_top_chunks(lines, example["rerank_top"])
+                    lines.append("")
+
+        if lora_result is not None:
+            lines.append("### LoRA: Cases Where Reranking Helped")
+            if not lora_helped_examples:
+                lines.append("No LoRA helped examples found in this run.")
+            else:
+                for idx, example in enumerate(lora_helped_examples, start=1):
+                    lines.append(f"#### LoRA Helped {idx}: `{example['id']}`")
+                    lines.append(f"- Clause: `{example['clause_type']}`")
+                    lines.append(f"- Doc: `{example['doc_id']}`")
+                    lines.append(f"- Question: {example['question']}")
+                    lines.append(f"- Expected spans: {example['expected_spans']}")
+                    lines.append("- Vector top chunks:")
+                    write_top_chunks(lines, example["vector_top"])
+                    lines.append("- LoRA-reranked top chunks:")
+                    write_top_chunks(lines, example["rerank_top"])
+                    lines.append("")
+
+            lines.append("### LoRA: Cases Where Reranking Failed")
+            if not lora_regressed_examples:
+                lines.append("No LoRA regressed examples found in this run.")
+            else:
+                for idx, example in enumerate(lora_regressed_examples, start=1):
+                    lines.append(f"#### LoRA Regressed {idx}: `{example['id']}`")
+                    lines.append(f"- Clause: `{example['clause_type']}`")
+                    lines.append(f"- Doc: `{example['doc_id']}`")
+                    lines.append(f"- Question: {example['question']}")
+                    lines.append(f"- Expected spans: {example['expected_spans']}")
+                    lines.append("- Vector top chunks:")
+                    write_top_chunks(lines, example["vector_top"])
+                    lines.append("- LoRA-reranked top chunks:")
+                    write_top_chunks(lines, example["rerank_top"])
+                    lines.append("")
 
     lines.append("## Failure Examples (By Method)")
     lines.append("")
@@ -502,14 +626,29 @@ def write_report(
             write_top_chunks(lines, fail["top_chunks"])
             lines.append("")
 
-    if rerank_result is not None:
+    if base_result is not None:
         lines.append("### Base-Reranker Failures")
-        rerank_failures = rerank_result.failures[: args.failure_examples]
-        if not rerank_failures:
+        base_failures = base_result.failures[: args.failure_examples]
+        if not base_failures:
             lines.append("No base-reranker failures at max K in this run.")
         else:
-            for idx, fail in enumerate(rerank_failures, start=1):
-                lines.append(f"#### Reranker Failure {idx}: `{fail['id']}`")
+            for idx, fail in enumerate(base_failures, start=1):
+                lines.append(f"#### Base Failure {idx}: `{fail['id']}`")
+                lines.append(f"- Clause: `{fail['clause_type']}`")
+                lines.append(f"- Doc: `{fail['doc_id']}`")
+                lines.append(f"- Question: {fail['question']}")
+                lines.append(f"- Expected spans: {fail['expected_spans']}")
+                lines.append("- Top retrieved chunks:")
+                write_top_chunks(lines, fail["top_chunks"])
+                lines.append("")
+    if lora_result is not None:
+        lines.append("### LoRA-Reranker Failures")
+        lora_failures = lora_result.failures[: args.failure_examples]
+        if not lora_failures:
+            lines.append("No LoRA-reranker failures at max K in this run.")
+        else:
+            for idx, fail in enumerate(lora_failures, start=1):
+                lines.append(f"#### LoRA Failure {idx}: `{fail['id']}`")
                 lines.append(f"- Clause: `{fail['clause_type']}`")
                 lines.append(f"- Doc: `{fail['doc_id']}`")
                 lines.append(f"- Question: {fail['question']}")
@@ -526,7 +665,7 @@ def main() -> None:
     args = parse_args()
     top_k_values = sorted(set(int(k) for k in args.top_k))
 
-    if args.reranker == "base" and max(top_k_values) > args.rerank_candidates:
+    if args.reranker != "none" and max(top_k_values) > args.rerank_candidates:
         raise ValueError(
             f"max(top_k)={max(top_k_values)} exceeds rerank candidate pool {args.rerank_candidates}"
         )
@@ -542,7 +681,7 @@ def main() -> None:
     questions = [str(item["question"]) for item in eval_items]
     query_vectors = encode_questions(questions=questions, model=model)
 
-    candidate_k = max(max(top_k_values), args.rerank_candidates if args.reranker == "base" else 0)
+    candidate_k = max(max(top_k_values), args.rerank_candidates if args.reranker != "none" else 0)
     vector_rankings = retrieve_vector_candidates(
         query_vectors=query_vectors,
         metadata=metadata,
@@ -556,31 +695,60 @@ def main() -> None:
         top_k_values=top_k_values,
     )
 
-    rerank_result: EvalResult | None = None
-    helped_examples: list[dict[str, object]] = []
-    regressed_examples: list[dict[str, object]] = []
+    base_result: EvalResult | None = None
+    lora_result: EvalResult | None = None
+    base_helped_examples: list[dict[str, object]] = []
+    base_regressed_examples: list[dict[str, object]] = []
+    lora_helped_examples: list[dict[str, object]] = []
+    lora_regressed_examples: list[dict[str, object]] = []
 
-    if args.reranker == "base":
-        reranker = BaseReranker(model_name=args.reranker_model)
-        rerank_rankings = apply_base_reranker(
+    rerank_inputs = [candidates[: args.rerank_candidates] for candidates in vector_rankings]
+    if args.reranker in {"base", "lora"}:
+        base_reranker = BaseReranker(model_name=args.reranker_model)
+        base_rankings = apply_reranker(
             eval_items=eval_items,
-            vector_rankings=[candidates[: args.rerank_candidates] for candidates in vector_rankings],
-            reranker=reranker,
+            vector_rankings=rerank_inputs,
+            reranker=base_reranker,
             top_k=args.rerank_candidates,
             batch_size=args.batch_size,
         )
 
-        rerank_result = evaluate_rankings(
+        base_result = evaluate_rankings(
             eval_items=eval_items,
-            ranked_candidates=rerank_rankings,
+            ranked_candidates=base_rankings,
             top_k_values=top_k_values,
         )
-        helped_examples, regressed_examples = collect_comparison_examples(
+        base_helped_examples, base_regressed_examples = collect_comparison_examples(
             eval_items=eval_items,
             vector_hits=vector_result.hits_at_max_k,
-            rerank_hits=rerank_result.hits_at_max_k,
+            rerank_hits=base_result.hits_at_max_k,
             vector_rankings=vector_rankings,
-            rerank_rankings=rerank_rankings,
+            rerank_rankings=base_rankings,
+            limit=args.comparison_examples,
+        )
+    if args.reranker == "lora":
+        lora_reranker = LoraReranker(
+            model_name=args.reranker_model,
+            adapter_path=str(args.lora_adapter),
+        )
+        lora_rankings = apply_reranker(
+            eval_items=eval_items,
+            vector_rankings=rerank_inputs,
+            reranker=lora_reranker,
+            top_k=args.rerank_candidates,
+            batch_size=args.batch_size,
+        )
+        lora_result = evaluate_rankings(
+            eval_items=eval_items,
+            ranked_candidates=lora_rankings,
+            top_k_values=top_k_values,
+        )
+        lora_helped_examples, lora_regressed_examples = collect_comparison_examples(
+            eval_items=eval_items,
+            vector_hits=vector_result.hits_at_max_k,
+            rerank_hits=lora_result.hits_at_max_k,
+            vector_rankings=vector_rankings,
+            rerank_rankings=lora_rankings,
             limit=args.comparison_examples,
         )
 
@@ -590,9 +758,12 @@ def main() -> None:
         eval_size=len(eval_items),
         sample_question=str(eval_items[0]["question"]) if eval_items else "",
         vector_result=vector_result,
-        rerank_result=rerank_result,
-        helped_examples=helped_examples,
-        regressed_examples=regressed_examples,
+        base_result=base_result,
+        lora_result=lora_result,
+        base_helped_examples=base_helped_examples,
+        base_regressed_examples=base_regressed_examples,
+        lora_helped_examples=lora_helped_examples,
+        lora_regressed_examples=lora_regressed_examples,
     )
 
     print(f"Evaluated {len(eval_items)} items")
@@ -603,12 +774,19 @@ def main() -> None:
             + f"Recall@{k}: {vector_result.overall[k]['recall_at_k']:.4f}"
         )
 
-    if rerank_result is not None:
+    if base_result is not None:
         print("Base-reranker metrics:")
         for k in top_k_values:
             print(
-                f"  Hit@{k}: {rerank_result.overall[k]['hit_at_k']:.4f} | "
-                + f"Recall@{k}: {rerank_result.overall[k]['recall_at_k']:.4f}"
+                f"  Hit@{k}: {base_result.overall[k]['hit_at_k']:.4f} | "
+                + f"Recall@{k}: {base_result.overall[k]['recall_at_k']:.4f}"
+            )
+    if lora_result is not None:
+        print("LoRA-reranker metrics:")
+        for k in top_k_values:
+            print(
+                f"  Hit@{k}: {lora_result.overall[k]['hit_at_k']:.4f} | "
+                + f"Recall@{k}: {lora_result.overall[k]['recall_at_k']:.4f}"
             )
 
     print(f"Wrote report to {args.report}")

@@ -50,3 +50,9 @@
 - Trained and saved reusable adapter artifacts under models/reranker_lora/.
 - Logged the exact training command, dataset sizes, and validation metrics.
 - Remaining blocker: need held-out comparison of vector vs base reranker vs LoRA reranker on Day 11.
+
+## Day 11
+- Loaded the saved LoRA adapter into the reranking path for held-out evaluation.
+- Compared vector-only, base reranker, and LoRA reranker side-by-side on the baseline eval set.
+- Found that the first-pass LoRA reranker underperformed the off-the-shelf base reranker on held-out retrieval metrics.
+- Remaining blocker: improve training setup or data quality before claiming LoRA gains, then proceed to harder stress-test evaluation.
