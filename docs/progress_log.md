@@ -44,3 +44,9 @@
 - Improved title-cue extraction to prefer real agreement titles over filing/redaction boilerplate.
 - Added a light filter to avoid boilerplate-only hard negatives while preserving deterministic behavior.
 - Remaining blocker: need LoRA reranker training and artifact save path for Day 10.
+
+## Day 10
+- Implemented LoRA fine-tuning for the reranker using the pointwise train/val dataset.
+- Trained and saved reusable adapter artifacts under models/reranker_lora/.
+- Logged the exact training command, dataset sizes, and validation metrics.
+- Remaining blocker: need held-out comparison of vector vs base reranker vs LoRA reranker on Day 11.
