@@ -31,3 +31,9 @@
 - Implemented overlap-based vector retrieval evaluation using hit@K and Recall@K.
 - Wrote a baseline retrieval report with overall metrics, per-clause breakdowns, and failure examples.
 - Remaining blocker: need an off-the-shelf reranker baseline for Day 8.
+
+## Day 8
+- Added an off-the-shelf cross-encoder reranker on top of vector retrieval.
+- Extended the eval runner to compare vector-only and vector+base-reranker performance.
+- Wrote a reranker baseline report with overall metrics, per-clause breakdowns, and qualitative examples.
+- Remaining blocker: need a reranker training dataset for LoRA fine-tuning on Day 9.
