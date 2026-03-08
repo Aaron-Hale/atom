@@ -37,3 +37,10 @@
 - Extended the eval runner to compare vector-only and vector+base-reranker performance.
 - Wrote a reranker baseline report with overall metrics, per-clause breakdowns, and qualitative examples.
 - Remaining blocker: need a reranker training dataset for LoRA fine-tuning on Day 9.
+
+## Day 9
+- Built deterministic pointwise reranker training and validation datasets from eval queries, chunk overlaps, and vector retrieval outputs.
+- Included positives, hard negatives, and same-document negatives with metadata for debugging and analysis.
+- Improved title-cue extraction to prefer real agreement titles over filing/redaction boilerplate.
+- Added a light filter to avoid boilerplate-only hard negatives while preserving deterministic behavior.
+- Remaining blocker: need LoRA reranker training and artifact save path for Day 10.

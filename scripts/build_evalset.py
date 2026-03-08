@@ -8,8 +8,40 @@ import json
 import re
 from pathlib import Path
 
-NOISE_PREFIXES = ("EXHIBIT", "REDACTED", "CONFIDENTIAL", "SOURCE:")
+NOISE_PREFIXES = ("REDACTED", "CONFIDENTIAL", "SOURCE:")
 TITLE_HINTS = ("agreement", "contract", "amendment", "license", "lease", "policy", "plan")
+TITLE_BOILERPLATE_MARKERS = (
+    "confidential treatment requested",
+    "confidential treatment has been requested",
+    "confidential portions of this",
+    "redacted provisions",
+    "confidential portion has been filed",
+    "filed with the commission",
+    "securities and exchange commission",
+    "pursuant to 17 c.f.r",
+    "has been omitted",
+    "has been redacted",
+    "table of contents",
+)
+NON_TITLE_SECTION_MARKERS = (
+    "term of contract",
+    "witnesseth",
+    "recitals",
+    "table of contents",
+    "miscellaneous provisions",
+    "consultant's obligations",
+    "adams golf's obligations",
+    "termination",
+    "definitions",
+)
+NON_TITLE_PHRASES = (
+    "entered into",
+    "during the term",
+    "whereas",
+    "now therefore",
+    "the parties agree",
+    "shall be",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,19 +72,82 @@ def load_contract_texts(path: Path) -> dict[str, str]:
 
 
 def extract_title_cue(contract_text: str, doc_id: str) -> str:
+    def normalize_title_candidate(value: str) -> str:
+        cue = re.sub(r"\s+", " ", value).strip()
+        cue = re.sub(
+            r"^.*?(?:filed with the commission|securities and exchange commission)\s+",
+            "",
+            cue,
+            flags=re.IGNORECASE,
+        )
+        cue = re.sub(
+            r"^.*?(?:confidential treatment requested|confidential portions of this)\s+",
+            "",
+            cue,
+            flags=re.IGNORECASE,
+        )
+        cue = re.sub(
+            r"^(?:Execution Version|EXHIBIT\s+[A-Za-z0-9.\-]+(?:[:\-\s]+|$))+",
+            "",
+            cue,
+            flags=re.IGNORECASE,
+        )
+        cue = re.sub(r"^This\s+", "", cue, flags=re.IGNORECASE)
+        return cue.strip()
+
+    def is_title_boilerplate(value: str) -> bool:
+        lowered = value.lower()
+        return any(marker in lowered for marker in TITLE_BOILERPLATE_MARKERS)
+
+    def is_plausible_title(value: str) -> bool:
+        lowered = value.lower()
+        if any(marker in lowered for marker in NON_TITLE_SECTION_MARKERS):
+            return False
+        if any(phrase in lowered for phrase in NON_TITLE_PHRASES):
+            return False
+        if " this agreement" in lowered:
+            return False
+        if any(ch in value for ch in ",;:"):
+            return False
+        if not any(hint in lowered for hint in TITLE_HINTS):
+            return False
+        tail = lowered.rstrip(" .-)'\"")
+        if not (
+            tail.endswith(TITLE_HINTS)
+            or "agreement and plan" in lowered
+        ):
+            return False
+        if len(value) > 120:
+            return False
+        word_count = len(value.split())
+        if word_count < 2 or word_count > 14:
+            return False
+        alpha_chars = [ch for ch in value if ch.isalpha()]
+        if not alpha_chars:
+            return False
+        upper_ratio = sum(1 for ch in alpha_chars if ch.isupper()) / len(alpha_chars)
+        titlecase_words = [
+            token for token in re.findall(r"[A-Za-z][A-Za-z0-9'/-]*", value) if token[0].isupper()
+        ]
+        titlecase_ratio = len(titlecase_words) / max(len(value.split()), 1)
+        if upper_ratio < 0.45 and titlecase_ratio < 0.65:
+            return False
+        return True
+
     fallback = doc_id.replace("cuad_", "").replace("_", " ")[:80].strip() or doc_id
-    lead_text = re.sub(r"\s+", " ", contract_text[:5000]).strip()
-    if lead_text:
+    for raw_line in contract_text.splitlines()[:160]:
+        line_text = re.sub(r"\s+", " ", raw_line).strip()
+        if not line_text:
+            continue
+        if line_text.upper().startswith(NOISE_PREFIXES):
+            continue
         for pattern in (
             r"([A-Z][A-Z0-9,&/\-\(\)\' ]{4,140}?(?:AGREEMENT|CONTRACT|AMENDMENT|LICENSE|LEASE|PLAN))",
             r"([A-Z][A-Za-z0-9,&/\-\(\)\' ]{4,140}?(?:Agreement|Contract|Amendment|License|Lease|Plan))",
         ):
-            match = re.search(pattern, lead_text)
-            if match:
-                cue = re.sub(r"\s+", " ", match.group(1)).strip()
-                cue = re.sub(r"^(Execution Version|EXHIBIT \d+(?:\.\d+)?)\s+", "", cue, flags=re.IGNORECASE)
-                cue = re.sub(r"^This\s+", "", cue, flags=re.IGNORECASE)
-                if len(cue) >= 6:
+            for match in re.finditer(pattern, line_text):
+                cue = normalize_title_candidate(match.group(1))
+                if len(cue) >= 6 and not is_title_boilerplate(cue) and is_plausible_title(cue):
                     return cue[:120]
 
     lines = contract_text.splitlines()
@@ -62,6 +157,8 @@ def extract_title_cue(contract_text: str, doc_id: str) -> str:
         if not text:
             continue
         if text.upper().startswith(NOISE_PREFIXES):
+            continue
+        if is_title_boilerplate(text):
             continue
         if len(text) < 5:
             continue
@@ -91,19 +188,33 @@ def extract_title_cue(contract_text: str, doc_id: str) -> str:
 
     for line in cleaned_lines:
         lower = line.lower()
-        if looks_like_header(line) and any(hint in lower for hint in TITLE_HINTS):
-            return line[:120]
+        if (
+            looks_like_header(line)
+            and any(hint in lower for hint in TITLE_HINTS)
+            and not is_title_boilerplate(line)
+            and is_plausible_title(line)
+        ):
+            return normalize_title_candidate(line)[:120]
 
     for line in cleaned_lines:
-        if looks_like_header(line):
-            return line[:120]
+        if (
+            looks_like_header(line)
+            and not is_title_boilerplate(line)
+            and is_plausible_title(line)
+        ):
+            return normalize_title_candidate(line)[:120]
 
     for line in cleaned_lines:
         lower = line.lower()
-        if any(hint in lower for hint in TITLE_HINTS) and not is_section_line(line):
-            return line[:120]
+        if (
+            any(hint in lower for hint in TITLE_HINTS)
+            and not is_section_line(line)
+            and not is_title_boilerplate(line)
+            and is_plausible_title(line)
+        ):
+            return normalize_title_candidate(line)[:120]
 
-    return cleaned_lines[0][:120]
+    return normalize_title_candidate(cleaned_lines[0])[:120]
 
 
 def build_evalset(labels_path: Path, contracts_path: Path) -> list[dict[str, object]]:
