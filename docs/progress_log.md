@@ -56,3 +56,17 @@
 - Compared vector-only, base reranker, and LoRA reranker side-by-side on the baseline eval set.
 - Found that the first-pass LoRA reranker underperformed the off-the-shelf base reranker on held-out retrieval metrics.
 - Remaining blocker: improve training setup or data quality before claiming LoRA gains, then proceed to harder stress-test evaluation.
+
+## Day 12
+- Added a parallel LoRA artifact for chunk-level legal clause classification without modifying reranker artifacts.
+- Built deterministic chunk-level train/val datasets from `chunks.jsonl` + `labels.jsonl` with explicit overlap policy and doc-level split.
+- Trained and saved a separate classifier adapter under `models/clause_classifier_lora/`.
+- Evaluated against a non-fine-tuned baseline and documented macro/weighted F1, per-class metrics, confusion patterns, and representative errors.
+- Remaining blocker: improve minority-class performance so the classifier beats the baseline on macro F1.
+
+## Day 13
+- Added a clause-conditioned binary detection artifact (`clause_type` + chunk text -> evidence yes/no) as a separate LoRA path.
+- Built deterministic binary train/val datasets from `chunks.jsonl` and `labels.jsonl` with mixed hard negatives (nearby same-doc, same-doc non-overlap, cross-doc hard, clause-absent).
+- Trained and saved `models/clause_binary_lora/` and recorded run metrics/commands.
+- Compared lexical baseline vs non-fine-tuned pretrained vs LoRA with PR-AUC, ROC-AUC, F1, precision, recall, plus per-clause positive-class metrics and macro averages.
+- Outcome: this binary setup produced a clear LoRA win over both baselines.

@@ -34,6 +34,11 @@ class EvalResult:
     hits_at_max_k: list[bool]
 
 
+@dataclass(frozen=True)
+class CoverageResult:
+    overall: dict[int, dict[str, float]]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evalset", type=Path, default=Path("eval/evalset_v1.jsonl"))
@@ -45,11 +50,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reranker-model", default="cross-encoder/ms-marco-MiniLM-L6-v2")
     parser.add_argument("--lora-adapter", type=Path, default=Path("models/reranker_lora"))
     parser.add_argument("--rerank-candidates", type=int, default=20)
+    parser.add_argument(
+        "--reranker-query-mode",
+        choices=["natural", "clause_only", "structured_clause"],
+        default="natural",
+    )
+    parser.add_argument("--reranker-vector-weight", type=float, default=0.0)
+    parser.add_argument("--reranker-boilerplate-penalty", type=float, default=0.0)
+    parser.add_argument("--reranker-filter-boilerplate", action="store_true")
+    parser.add_argument("--reranker-boilerplate-max-start", type=int, default=1800)
+    parser.add_argument("--reranker-min-candidates-after-filter", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--top-k", type=int, nargs="+", default=[1, 3, 5, 10])
+    parser.add_argument("--coverage-k", type=int, nargs="+", default=[20, 50, 100])
     parser.add_argument("--failure-examples", type=int, default=5)
     parser.add_argument("--comparison-examples", type=int, default=3)
     return parser.parse_args()
+
+
+def normalize_clause_type(clause_type: str) -> str:
+    return clause_type.replace("_", " ").strip()
+
+
+def build_reranker_query(item: dict[str, object], query_mode: str) -> str:
+    if query_mode == "natural":
+        return str(item["question"])
+
+    clause_label = normalize_clause_type(str(item["clause_type"]))
+    if query_mode == "clause_only":
+        return f"{clause_label} clause"
+
+    return f"Find the clause in this contract. Clause type: {clause_label}."
 
 
 def load_jsonl(path: Path) -> list[dict[str, object]]:
@@ -142,13 +173,24 @@ def apply_reranker(
     reranker: Any,
     top_k: int,
     batch_size: int,
+    query_mode: str,
+    vector_weight: float,
+    boilerplate_penalty: float,
+    boilerplate_filter: bool,
+    boilerplate_max_start: int,
+    min_candidates_after_filter: int,
 ) -> list[list[dict[str, object]]]:
-    queries = [str(item["question"]) for item in eval_items]
+    queries = [build_reranker_query(item=item, query_mode=query_mode) for item in eval_items]
     return reranker.rerank_batch(
         queries=queries,
         candidate_lists=vector_rankings,
         top_k=top_k,
         batch_size=batch_size,
+        vector_weight=vector_weight,
+        boilerplate_penalty=boilerplate_penalty,
+        boilerplate_filter=boilerplate_filter,
+        boilerplate_max_start=boilerplate_max_start,
+        min_candidates_after_filter=min_candidates_after_filter,
     )
 
 
@@ -268,6 +310,50 @@ def evaluate_rankings(
     )
 
 
+def evaluate_candidate_coverage(
+    eval_items: list[dict[str, object]],
+    ranked_candidates: list[list[dict[str, object]]],
+    top_k_values: list[int],
+) -> CoverageResult:
+    totals_by_k = {k: {"hits": 0, "recall_sum": 0.0} for k in top_k_values}
+
+    for item, retrieved in zip(eval_items, ranked_candidates):
+        expected_spans = [
+            {"start": int(span["start"]), "end": int(span["end"])}
+            for span in item["expected_spans"]  # type: ignore[index]
+        ]
+        num_expected = len(expected_spans)
+        doc_id = str(item["doc_id"])
+
+        for k in top_k_values:
+            covered = set()
+            for chunk in retrieved[:k]:
+                if str(chunk["doc_id"]) != doc_id:
+                    continue
+                for span_idx, span in enumerate(expected_spans):
+                    if spans_overlap(
+                        int(chunk["start"]),
+                        int(chunk["end"]),
+                        span["start"],
+                        span["end"],
+                    ):
+                        covered.add(span_idx)
+
+            totals_by_k[k]["hits"] += 1 if covered else 0
+            totals_by_k[k]["recall_sum"] += (len(covered) / num_expected) if num_expected else 0.0
+
+    total_items = len(eval_items)
+    return CoverageResult(
+        overall={
+            k: {
+                "candidate_hit_at_k": totals_by_k[k]["hits"] / total_items,
+                "oracle_recall_at_k": totals_by_k[k]["recall_sum"] / total_items,
+            }
+            for k in top_k_values
+        }
+    )
+
+
 def collect_comparison_examples(
     eval_items: list[dict[str, object]],
     vector_hits: list[bool],
@@ -345,6 +431,8 @@ def write_report(
     eval_size: int,
     sample_question: str,
     vector_result: EvalResult,
+    coverage_result: CoverageResult,
+    coverage_k_values: list[int],
     base_result: EvalResult | None,
     lora_result: EvalResult | None,
     base_helped_examples: list[dict[str, object]],
@@ -371,13 +459,39 @@ def write_report(
         lines.append(f"- Reranker backbone: `{args.reranker_model}`")
         lines.append(f"- LoRA adapter path: `{args.lora_adapter}`")
         lines.append(f"- Rerank candidate pool: top {args.rerank_candidates} vector candidates")
+        lines.append(f"- Reranker query mode: `{args.reranker_query_mode}`")
+        lines.append(f"- Score blend vector weight: {args.reranker_vector_weight:.2f}")
+        lines.append(f"- Boilerplate penalty: {args.reranker_boilerplate_penalty:.2f}")
+        lines.append(f"- Boilerplate filter enabled: `{args.reranker_filter_boilerplate}`")
+        lines.append(f"- Boilerplate max-start: {args.reranker_boilerplate_max_start}")
+        lines.append(
+            f"- Min candidates after filter fallback: {args.reranker_min_candidates_after_filter}"
+        )
     lines.append(f"- Top-K: {top_k_values}")
-    lines.append(
-        '- Query policy: deterministic contract-specific question format `In the agreement "<title cue>", '
-        'find the <clause_type> clause.`'
-    )
-    lines.append("- Title cue policy: first meaningful contract header/title line from source text after skipping filing boilerplate lines")
-    lines.append(f"- Example question: {sample_question}")
+    if args.reranker_query_mode == "natural":
+        lines.append(
+            '- Reranker query policy: deterministic contract-specific question format `In the agreement "<title cue>", '
+            'find the <clause_type> clause.`'
+        )
+        lines.append(
+            "- Title cue policy: first meaningful contract header/title line from source text after skipping filing boilerplate lines"
+        )
+    elif args.reranker_query_mode == "clause_only":
+        lines.append("- Reranker query policy: deterministic clause label only (`<clause_type> clause`)")
+    else:
+        lines.append(
+            "- Reranker query policy: deterministic structured clause prompt (`Find the clause in this contract. Clause type: <clause_type>.`)"
+        )
+    lines.append(f"- Example reranker query: {sample_question}")
+    lines.append("")
+    lines.append("## Vector Candidate Coverage (Oracle Overlap)")
+    lines.append("")
+    lines.append("| K | Candidate Hit@K | Oracle Recall@K |")
+    lines.append("| --- | --- | --- |")
+    for k in coverage_k_values:
+        lines.append(
+            f"| {k} | {coverage_result.overall[k]['candidate_hit_at_k']:.4f} | {coverage_result.overall[k]['oracle_recall_at_k']:.4f} |"
+        )
     lines.append("")
 
     lines.append("## Overall Metrics")
@@ -664,6 +778,15 @@ def write_report(
 def main() -> None:
     args = parse_args()
     top_k_values = sorted(set(int(k) for k in args.top_k))
+    coverage_k_values = sorted(set(int(k) for k in args.coverage_k))
+    if not (0.0 <= args.reranker_vector_weight <= 1.0):
+        raise ValueError("--reranker-vector-weight must be in [0.0, 1.0]")
+    if args.reranker_boilerplate_penalty < 0.0:
+        raise ValueError("--reranker-boilerplate-penalty must be >= 0.0")
+    if args.reranker_boilerplate_max_start < 0:
+        raise ValueError("--reranker-boilerplate-max-start must be >= 0")
+    if args.reranker_min_candidates_after_filter < 1:
+        raise ValueError("--reranker-min-candidates-after-filter must be >= 1")
 
     if args.reranker != "none" and max(top_k_values) > args.rerank_candidates:
         raise ValueError(
@@ -681,7 +804,11 @@ def main() -> None:
     questions = [str(item["question"]) for item in eval_items]
     query_vectors = encode_questions(questions=questions, model=model)
 
-    candidate_k = max(max(top_k_values), args.rerank_candidates if args.reranker != "none" else 0)
+    candidate_k = max(
+        max(top_k_values),
+        max(coverage_k_values),
+        args.rerank_candidates if args.reranker != "none" else 0,
+    )
     vector_rankings = retrieve_vector_candidates(
         query_vectors=query_vectors,
         metadata=metadata,
@@ -693,6 +820,11 @@ def main() -> None:
         eval_items=eval_items,
         ranked_candidates=vector_rankings,
         top_k_values=top_k_values,
+    )
+    coverage_result = evaluate_candidate_coverage(
+        eval_items=eval_items,
+        ranked_candidates=vector_rankings,
+        top_k_values=coverage_k_values,
     )
 
     base_result: EvalResult | None = None
@@ -711,6 +843,12 @@ def main() -> None:
             reranker=base_reranker,
             top_k=args.rerank_candidates,
             batch_size=args.batch_size,
+            query_mode=args.reranker_query_mode,
+            vector_weight=args.reranker_vector_weight,
+            boilerplate_penalty=args.reranker_boilerplate_penalty,
+            boilerplate_filter=args.reranker_filter_boilerplate,
+            boilerplate_max_start=args.reranker_boilerplate_max_start,
+            min_candidates_after_filter=args.reranker_min_candidates_after_filter,
         )
 
         base_result = evaluate_rankings(
@@ -737,6 +875,12 @@ def main() -> None:
             reranker=lora_reranker,
             top_k=args.rerank_candidates,
             batch_size=args.batch_size,
+            query_mode=args.reranker_query_mode,
+            vector_weight=args.reranker_vector_weight,
+            boilerplate_penalty=args.reranker_boilerplate_penalty,
+            boilerplate_filter=args.reranker_filter_boilerplate,
+            boilerplate_max_start=args.reranker_boilerplate_max_start,
+            min_candidates_after_filter=args.reranker_min_candidates_after_filter,
         )
         lora_result = evaluate_rankings(
             eval_items=eval_items,
@@ -756,8 +900,17 @@ def main() -> None:
         report_path=args.report,
         args=args,
         eval_size=len(eval_items),
-        sample_question=str(eval_items[0]["question"]) if eval_items else "",
+        sample_question=(
+            build_reranker_query(
+                item=eval_items[0],
+                query_mode=args.reranker_query_mode,
+            )
+            if eval_items
+            else ""
+        ),
         vector_result=vector_result,
+        coverage_result=coverage_result,
+        coverage_k_values=coverage_k_values,
         base_result=base_result,
         lora_result=lora_result,
         base_helped_examples=base_helped_examples,
@@ -772,6 +925,12 @@ def main() -> None:
         print(
             f"  Hit@{k}: {vector_result.overall[k]['hit_at_k']:.4f} | "
             + f"Recall@{k}: {vector_result.overall[k]['recall_at_k']:.4f}"
+        )
+    print("Vector candidate coverage/oracle overlap:")
+    for k in coverage_k_values:
+        print(
+            f"  Top-{k}: Candidate Hit={coverage_result.overall[k]['candidate_hit_at_k']:.4f} | "
+            + f"Oracle Recall={coverage_result.overall[k]['oracle_recall_at_k']:.4f}"
         )
 
     if base_result is not None:

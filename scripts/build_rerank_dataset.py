@@ -37,13 +37,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evalset", type=Path, default=Path("eval/evalset_v1.jsonl"))
     parser.add_argument("--metadata", type=Path, default=Path("data/chunk_metadata.jsonl"))
     parser.add_argument("--index", type=Path, default=Path("data/faiss.index"))
-    parser.add_argument("--train-out", type=Path, default=Path("data/rerank_train.jsonl"))
-    parser.add_argument("--val-out", type=Path, default=Path("data/rerank_val.jsonl"))
+    parser.add_argument("--train-out", type=Path, default=Path("data/rerank_train_v2.jsonl"))
+    parser.add_argument("--val-out", type=Path, default=Path("data/rerank_val_v2.jsonl"))
     parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--vector-top-k", type=int, default=20)
+    parser.add_argument("--vector-top-k", type=int, default=50)
     parser.add_argument("--hard-negatives-per-query", type=int, default=4)
     parser.add_argument("--same-doc-negatives-per-query", type=int, default=2)
+    parser.add_argument(
+        "--dataset-format",
+        choices=("pointwise", "pairwise"),
+        default="pointwise",
+    )
+    parser.add_argument("--pairwise-same-doc-negatives-per-query", type=int, default=2)
+    parser.add_argument("--pairwise-cross-doc-negatives-per-query", type=int, default=2)
+    parser.add_argument(
+        "--query-mode",
+        choices=("natural", "clause_only", "structured_clause"),
+        default="clause_only",
+    )
+    parser.add_argument("--boilerplate-max-start", type=int, default=1800)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     return parser.parse_args()
 
@@ -116,6 +129,18 @@ def build_stats(rows: list[dict[str, Any]]) -> dict[str, float | int]:
     }
 
 
+def build_pairwise_stats(rows: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "total_pairs": len(rows),
+        "same_doc_pairs": sum(
+            1 for row in rows if str(row.get("meta", {}).get("negative_type", "")) == "same_doc_hard"
+        ),
+        "cross_doc_pairs": sum(
+            1 for row in rows if str(row.get("meta", {}).get("negative_type", "")) == "cross_doc_hard"
+        ),
+    }
+
+
 def is_boilerplate_heavy_chunk(text: str) -> bool:
     probe = " ".join(str(text).lower().split())
     if not probe:
@@ -124,6 +149,35 @@ def is_boilerplate_heavy_chunk(text: str) -> bool:
     if marker_hits >= 2:
         return True
     return marker_hits >= 1 and probe.startswith("exhibit")
+
+
+def normalize_clause_type(clause_type: str) -> str:
+    return clause_type.replace("_", " ").strip()
+
+
+def build_query(question: str, clause_type: str, query_mode: str) -> str:
+    if query_mode == "natural":
+        return question
+    clause_label = normalize_clause_type(clause_type)
+    if query_mode == "clause_only":
+        return f"{clause_label} clause"
+    return f"Find the clause in this contract. Clause type: {clause_label}."
+
+
+def prefer_non_boilerplate(
+    rows: list[tuple[ChunkRow, float]],
+    boilerplate_max_start: int,
+) -> list[tuple[ChunkRow, float]]:
+    non_bp = [
+        item
+        for item in rows
+        if not (
+            item[0].start <= boilerplate_max_start
+            and is_boilerplate_heavy_chunk(item[0].text)
+        )
+    ]
+    bp = [item for item in rows if item not in non_bp]
+    return non_bp + bp
 
 
 def main() -> None:
@@ -137,16 +191,21 @@ def main() -> None:
         raise ValueError(f"No chunk metadata rows found in {args.metadata}")
 
     chunks_by_doc: dict[str, list[ChunkRow]] = {}
-    chunk_by_id: dict[str, ChunkRow] = {}
     for chunk in chunks:
         chunks_by_doc.setdefault(chunk.doc_id, []).append(chunk)
-        chunk_by_id[chunk.chunk_id] = chunk
 
     for doc_id in chunks_by_doc:
         chunks_by_doc[doc_id].sort(key=lambda row: (row.start, row.end, row.chunk_id))
 
     model = SentenceTransformer(args.model, local_files_only=True)
-    query_texts = [str(row["question"]) for row in eval_rows]
+    query_texts = [
+        build_query(
+            question=str(row["question"]),
+            clause_type=str(row["clause_type"]),
+            query_mode=args.query_mode,
+        )
+        for row in eval_rows
+    ]
     query_vectors = model.encode(
         query_texts,
         batch_size=args.batch_size,
@@ -171,8 +230,12 @@ def main() -> None:
     for i, item in enumerate(eval_rows, start=1):
         query_id = str(item["id"])
         doc_id = str(item["doc_id"])
-        question = str(item["question"])
         clause_type = str(item["clause_type"])
+        rerank_query = build_query(
+            question=str(item["question"]),
+            clause_type=clause_type,
+            query_mode=args.query_mode,
+        )
         expected_spans = [
             {"start": int(span["start"]), "end": int(span["end"])}
             for span in item["expected_spans"]
@@ -182,118 +245,213 @@ def main() -> None:
         positive_chunks = [chunk for chunk in doc_chunks if overlaps_expected(chunk, expected_spans)]
         positive_ids = {chunk.chunk_id for chunk in positive_chunks}
 
-        same_doc_negatives = [chunk for chunk in doc_chunks if chunk.chunk_id not in positive_ids]
-        same_doc_negatives = same_doc_negatives[: args.same_doc_negatives_per_query]
-
         query_vec = query_vectors[i - 1].reshape(1, -1)
         scores, hit_indices = index.search(query_vec, args.vector_top_k)
 
-        hard_negatives: list[tuple[ChunkRow, float]] = []
+        retrieved_ranked: list[tuple[ChunkRow, float]] = []
         for idx, score in zip(hit_indices[0], scores[0]):
             if idx < 0:
                 continue
-            chunk = chunks[int(idx)]
+            retrieved_ranked.append((chunks[int(idx)], float(score)))
+
+        hard_negatives: list[tuple[ChunkRow, float]] = []
+        for chunk, score in retrieved_ranked:
             if chunk.doc_id == doc_id:
                 continue
             if overlaps_expected(chunk, expected_spans):
                 continue
-            if is_boilerplate_heavy_chunk(chunk.text):
+            if chunk.start <= args.boilerplate_max_start and is_boilerplate_heavy_chunk(chunk.text):
                 continue
             hard_negatives.append((chunk, float(score)))
             if len(hard_negatives) >= args.hard_negatives_per_query:
                 break
+
+        same_doc_negatives = [chunk for chunk in doc_chunks if chunk.chunk_id not in positive_ids]
+        same_doc_negatives = same_doc_negatives[: args.same_doc_negatives_per_query]
 
         if not positive_chunks:
             continue
 
         target_rows = val_rows if in_validation(doc_id, args.val_ratio) else train_rows
 
-        for chunk in positive_chunks:
-            target_rows.append(
-                {
-                    "query": question,
-                    "text": chunk.text,
-                    "label": 1,
-                    "meta": {
-                        "query_id": query_id,
-                        "query_doc_id": doc_id,
-                        "clause_type": clause_type,
-                        "chunk_id": chunk.chunk_id,
-                        "chunk_doc_id": chunk.doc_id,
-                        "chunk_start": chunk.start,
-                        "chunk_end": chunk.end,
-                        "expected_spans": expected_spans,
-                        "source": "positive_overlap_same_doc",
-                    },
-                }
-            )
+        if args.dataset_format == "pointwise":
+            for chunk in positive_chunks:
+                target_rows.append(
+                    {
+                        "query": rerank_query,
+                        "text": chunk.text,
+                        "label": 1,
+                        "meta": {
+                            "query_id": query_id,
+                            "query_doc_id": doc_id,
+                            "clause_type": clause_type,
+                            "chunk_id": chunk.chunk_id,
+                            "chunk_doc_id": chunk.doc_id,
+                            "chunk_start": chunk.start,
+                            "chunk_end": chunk.end,
+                            "expected_spans": expected_spans,
+                            "query_mode": args.query_mode,
+                            "source": "positive_overlap_same_doc",
+                        },
+                    }
+                )
 
-        for chunk, score in hard_negatives:
-            target_rows.append(
-                {
-                    "query": question,
-                    "text": chunk.text,
-                    "label": 0,
-                    "meta": {
-                        "query_id": query_id,
-                        "query_doc_id": doc_id,
-                        "clause_type": clause_type,
-                        "chunk_id": chunk.chunk_id,
-                        "chunk_doc_id": chunk.doc_id,
-                        "chunk_start": chunk.start,
-                        "chunk_end": chunk.end,
-                        "expected_spans": expected_spans,
-                        "negative_type": "hard",
-                        "vector_score": score,
-                        "source": "vector_topk_non_overlap",
-                    },
-                }
-            )
+            for chunk, score in hard_negatives:
+                target_rows.append(
+                    {
+                        "query": rerank_query,
+                        "text": chunk.text,
+                        "label": 0,
+                        "meta": {
+                            "query_id": query_id,
+                            "query_doc_id": doc_id,
+                            "clause_type": clause_type,
+                            "chunk_id": chunk.chunk_id,
+                            "chunk_doc_id": chunk.doc_id,
+                            "chunk_start": chunk.start,
+                            "chunk_end": chunk.end,
+                            "expected_spans": expected_spans,
+                            "negative_type": "hard",
+                            "vector_score": score,
+                            "query_mode": args.query_mode,
+                            "source": "vector_topk_non_overlap",
+                        },
+                    }
+                )
 
-        for chunk in same_doc_negatives:
-            target_rows.append(
-                {
-                    "query": question,
-                    "text": chunk.text,
-                    "label": 0,
-                    "meta": {
-                        "query_id": query_id,
-                        "query_doc_id": doc_id,
-                        "clause_type": clause_type,
-                        "chunk_id": chunk.chunk_id,
-                        "chunk_doc_id": chunk.doc_id,
-                        "chunk_start": chunk.start,
-                        "chunk_end": chunk.end,
-                        "expected_spans": expected_spans,
-                        "negative_type": "same_doc",
-                        "source": "same_doc_non_overlap",
-                    },
-                }
-            )
+            for chunk in same_doc_negatives:
+                target_rows.append(
+                    {
+                        "query": rerank_query,
+                        "text": chunk.text,
+                        "label": 0,
+                        "meta": {
+                            "query_id": query_id,
+                            "query_doc_id": doc_id,
+                            "clause_type": clause_type,
+                            "chunk_id": chunk.chunk_id,
+                            "chunk_doc_id": chunk.doc_id,
+                            "chunk_start": chunk.start,
+                            "chunk_end": chunk.end,
+                            "expected_spans": expected_spans,
+                            "negative_type": "same_doc",
+                            "query_mode": args.query_mode,
+                            "source": "same_doc_non_overlap",
+                        },
+                    }
+                )
+        else:
+            positives_sorted = sorted(positive_chunks, key=lambda row: (row.start, row.end, row.chunk_id))
+            same_doc_ranked = [
+                (chunk, score)
+                for chunk, score in retrieved_ranked
+                if chunk.doc_id == doc_id and chunk.chunk_id not in positive_ids
+            ]
+            cross_doc_ranked = [
+                (chunk, score)
+                for chunk, score in retrieved_ranked
+                if chunk.doc_id != doc_id and not overlaps_expected(chunk, expected_spans)
+            ]
+            same_doc_ranked = prefer_non_boilerplate(same_doc_ranked, args.boilerplate_max_start)
+            cross_doc_ranked = prefer_non_boilerplate(cross_doc_ranked, args.boilerplate_max_start)
+            if len(same_doc_ranked) < args.pairwise_same_doc_negatives_per_query:
+                seen_same_doc = {chunk.chunk_id for chunk, _score in same_doc_ranked}
+                fallback_same_doc = [
+                    (chunk, -1.0)
+                    for chunk in doc_chunks
+                    if chunk.chunk_id not in positive_ids
+                    and chunk.chunk_id not in seen_same_doc
+                    and not (
+                        chunk.start <= args.boilerplate_max_start
+                        and is_boilerplate_heavy_chunk(chunk.text)
+                    )
+                ]
+                same_doc_ranked.extend(fallback_same_doc)
+            same_doc_ranked = same_doc_ranked[: args.pairwise_same_doc_negatives_per_query]
+            cross_doc_ranked = cross_doc_ranked[: args.pairwise_cross_doc_negatives_per_query]
+
+            pairwise_negs: list[tuple[ChunkRow, float, str]] = []
+            pairwise_negs.extend((chunk, score, "same_doc_hard") for chunk, score in same_doc_ranked)
+            pairwise_negs.extend((chunk, score, "cross_doc_hard") for chunk, score in cross_doc_ranked)
+
+            for pair_idx, (neg_chunk, neg_score, neg_type) in enumerate(pairwise_negs):
+                pos_chunk = positives_sorted[pair_idx % len(positives_sorted)]
+                target_rows.append(
+                    {
+                        "query": rerank_query,
+                        "pos_text": pos_chunk.text,
+                        "neg_text": neg_chunk.text,
+                        "label": 1,
+                        "meta": {
+                            "query_id": query_id,
+                            "query_doc_id": doc_id,
+                            "clause_type": clause_type,
+                            "query_mode": args.query_mode,
+                            "expected_spans": expected_spans,
+                            "pos_chunk_id": pos_chunk.chunk_id,
+                            "pos_chunk_doc_id": pos_chunk.doc_id,
+                            "pos_chunk_start": pos_chunk.start,
+                            "pos_chunk_end": pos_chunk.end,
+                            "neg_chunk_id": neg_chunk.chunk_id,
+                            "neg_chunk_doc_id": neg_chunk.doc_id,
+                            "neg_chunk_start": neg_chunk.start,
+                            "neg_chunk_end": neg_chunk.end,
+                            "negative_type": neg_type,
+                            "neg_vector_score": neg_score,
+                            "source": "pairwise_hard_rank",
+                        },
+                    }
+                )
 
         if i % 200 == 0 or i == len(eval_rows):
             print(f"Processed {i}/{len(eval_rows)} eval queries")
 
-    train_rows.sort(
-        key=lambda row: (
-            str(row["meta"]["query_id"]),
-            int(row["label"]),
-            str(row["meta"]["chunk_id"]),
+    if args.dataset_format == "pointwise":
+        train_rows.sort(
+            key=lambda row: (
+                str(row["meta"]["query_id"]),
+                int(row["label"]),
+                str(row["meta"]["chunk_id"]),
+            )
         )
-    )
-    val_rows.sort(
-        key=lambda row: (
-            str(row["meta"]["query_id"]),
-            int(row["label"]),
-            str(row["meta"]["chunk_id"]),
+        val_rows.sort(
+            key=lambda row: (
+                str(row["meta"]["query_id"]),
+                int(row["label"]),
+                str(row["meta"]["chunk_id"]),
+            )
         )
-    )
+    else:
+        train_rows.sort(
+            key=lambda row: (
+                str(row["meta"]["query_id"]),
+                str(row["meta"].get("negative_type", "")),
+                str(row["meta"]["neg_chunk_id"]),
+                str(row["meta"]["pos_chunk_id"]),
+            )
+        )
+        val_rows.sort(
+            key=lambda row: (
+                str(row["meta"]["query_id"]),
+                str(row["meta"].get("negative_type", "")),
+                str(row["meta"]["neg_chunk_id"]),
+                str(row["meta"]["pos_chunk_id"]),
+            )
+        )
 
     write_jsonl(args.train_out, train_rows)
     write_jsonl(args.val_out, val_rows)
 
-    train_stats = build_stats(train_rows)
-    val_stats = build_stats(val_rows)
+    train_stats = (
+        build_stats(train_rows)
+        if args.dataset_format == "pointwise"
+        else build_pairwise_stats(train_rows)
+    )
+    val_stats = (
+        build_stats(val_rows)
+        if args.dataset_format == "pointwise"
+        else build_pairwise_stats(val_rows)
+    )
 
     print(f"Wrote {len(train_rows)} rows to {args.train_out}")
     print(f"Wrote {len(val_rows)} rows to {args.val_out}")

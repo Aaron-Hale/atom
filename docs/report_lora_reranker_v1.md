@@ -1,10 +1,9 @@
-# LoRA Reranker Evaluation Report (Day 11)
+# Reranker Evaluation Report
 
 ## Experiment
-- Generated: 2026-03-08 01:29 UTC
+- Generated: 2026-03-08 03:43 UTC
 - Purpose: compare vector-only retrieval against base and LoRA reranker modes
 - Eval set: `eval/evalset_v1.jsonl`
-- Split: held-out evaluation set
 - Eval items: 1903
 - Index: `data/faiss.index`
 - Metadata: `data/chunk_metadata.jsonl`
@@ -17,7 +16,14 @@
 - Query policy: deterministic contract-specific question format `In the agreement "<title cue>", find the <clause_type> clause.`
 - Title cue policy: first meaningful contract header/title line from source text after skipping filing boilerplate lines
 - Example question: In the agreement "CO-BRANDING AND ADVERTISING AGREEMENT", find the assignment clause.
-- Command: `PYTHONPATH=. .venv/bin/python eval/run_retrieval_eval.py --reranker lora --report docs/report_lora_reranker_v1.md`
+
+## Vector Candidate Coverage (Oracle Overlap)
+
+| K | Candidate Hit@K | Oracle Recall@K |
+| --- | --- | --- |
+| 20 | 0.1345 | 0.1008 |
+| 50 | 0.2107 | 0.1610 |
+| 100 | 0.2733 | 0.2159 |
 
 ## Overall Metrics
 

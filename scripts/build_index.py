@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import faiss
@@ -15,6 +16,7 @@ from sentence_transformers import SentenceTransformer
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chunks", type=Path, default=Path("data/chunks.jsonl"))
+    parser.add_argument("--contracts", type=Path, default=Path("data/contracts.jsonl"))
     parser.add_argument("--index-out", type=Path, default=Path("data/faiss.index"))
     parser.add_argument("--metadata-out", type=Path, default=Path("data/chunk_metadata.jsonl"))
     parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
@@ -53,16 +55,90 @@ def save_metadata(metadata: list[dict[str, object]], output_path: Path) -> None:
             outfile.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def extract_title_cue(contract_text: str, doc_id: str) -> str:
+    fallback = doc_id.replace("cuad_", "").replace("_", " ")[:80].strip() or doc_id
+    if not contract_text:
+        return fallback
+
+    for raw_line in contract_text.splitlines()[:160]:
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith(("redacted", "confidential", "source:")):
+            continue
+        if any(marker in lowered for marker in ("filed with the commission", "securities and exchange commission")):
+            continue
+        if len(line) > 120:
+            continue
+        if any(hint in lowered for hint in ("agreement", "contract", "amendment", "license", "lease", "plan")):
+            return line
+
+    for raw_line in contract_text.splitlines()[:200]:
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if 5 <= len(line) <= 120:
+            return line
+    return fallback
+
+
+def extract_chunk_heading(chunk_text: str) -> str:
+    for raw_line in chunk_text.splitlines()[:20]:
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if len(line) < 5 or len(line) > 90:
+            continue
+        if any(ch in line for ch in ",;:"):
+            continue
+        alpha = [ch for ch in line if ch.isalpha()]
+        if len(alpha) < 4:
+            continue
+        upper_ratio = sum(1 for ch in alpha if ch.isupper()) / len(alpha)
+        if upper_ratio >= 0.5:
+            return line
+    return ""
+
+
+def build_embedding_text(raw_text: str, title_cue: str, heading: str) -> str:
+    parts = [f"Document Title: {title_cue}"]
+    if heading:
+        parts.append(f"Section Heading: {heading}")
+    parts.append("Chunk Text:")
+    parts.append(raw_text)
+    return "\n".join(parts)
+
+
+def load_contract_titles(path: Path) -> dict[str, str]:
+    titles: dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as infile:
+        for line in infile:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            doc_id = str(row["doc_id"])
+            titles[doc_id] = extract_title_cue(str(row.get("text", "")), doc_id)
+    return titles
+
+
 def build_index(
     chunks_path: Path,
+    contracts_path: Path,
     index_out: Path,
     metadata_out: Path,
     model_name: str,
     batch_size: int,
 ) -> int:
-    texts, metadata = load_chunks(chunks_path)
-    if not texts:
+    _, metadata = load_chunks(chunks_path)
+    if not metadata:
         raise ValueError(f"No chunks found in {chunks_path}")
+    title_by_doc = load_contract_titles(contracts_path)
+    texts = [
+        build_embedding_text(
+            raw_text=str(row["text"]),
+            title_cue=title_by_doc.get(str(row["doc_id"]), str(row["doc_id"])),
+            heading=extract_chunk_heading(str(row["text"])),
+        )
+        for row in metadata
+    ]
 
     model = SentenceTransformer(model_name, local_files_only=True)
     embeddings = model.encode(
@@ -88,6 +164,7 @@ def main() -> None:
     args = parse_args()
     total = build_index(
         chunks_path=args.chunks,
+        contracts_path=args.contracts,
         index_out=args.index_out,
         metadata_out=args.metadata_out,
         model_name=args.model,

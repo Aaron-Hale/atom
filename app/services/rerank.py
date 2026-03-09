@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -52,18 +53,115 @@ class BaseReranker:
             rescored.sort(key=lambda item: item["score"], reverse=True)
         return rescored
 
+    @staticmethod
+    def _normalize(values: list[float]) -> list[float]:
+        if not values:
+            return []
+        minimum = min(values)
+        maximum = max(values)
+        if maximum <= minimum:
+            return [0.0 for _ in values]
+        scale = maximum - minimum
+        return [(value - minimum) / scale for value in values]
+
+    @staticmethod
+    def _is_boilerplate_candidate(
+        candidate: dict[str, Any],
+        boilerplate_max_start: int,
+    ) -> bool:
+        start = int(candidate.get("start", 0))
+        if start > boilerplate_max_start:
+            return False
+        text = str(candidate.get("text", "")).strip().lower()
+        if not text:
+            return False
+
+        patterns = (
+            r"\bexhibit\b",
+            r"confidential treatment requested",
+            r"securities and exchange commission",
+            r"\b17 c\.f\.r\.",
+            r"\bform 10[- ]",
+            r"commission file number",
+            r"table of contents",
+            r"signature page",
+            r"pursuant to",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    @classmethod
+    def _apply_boilerplate_controls(
+        cls,
+        candidates: list[dict[str, Any]],
+        rerank_scores: list[float],
+        vector_weight: float,
+        boilerplate_penalty: float,
+        boilerplate_filter: bool,
+        boilerplate_max_start: int,
+        min_candidates_after_filter: int,
+    ) -> tuple[list[dict[str, Any]], list[float]]:
+        if not candidates:
+            return [], []
+
+        mask = [
+            cls._is_boilerplate_candidate(
+                candidate=candidate,
+                boilerplate_max_start=boilerplate_max_start,
+            )
+            for candidate in candidates
+        ]
+
+        if boilerplate_filter:
+            keep_idx = [idx for idx, is_bad in enumerate(mask) if not is_bad]
+            if len(keep_idx) >= min_candidates_after_filter:
+                candidates = [candidates[idx] for idx in keep_idx]
+                rerank_scores = [rerank_scores[idx] for idx in keep_idx]
+                mask = [mask[idx] for idx in keep_idx]
+
+        blended_scores = list(rerank_scores)
+        if vector_weight > 0.0:
+            rerank_norm = cls._normalize(list(rerank_scores))
+            vector_norm = cls._normalize([float(candidate["score"]) for candidate in candidates])
+            blended_scores = [
+                ((1.0 - vector_weight) * rerank_norm[idx]) + (vector_weight * vector_norm[idx])
+                for idx in range(len(candidates))
+            ]
+
+        if boilerplate_penalty > 0.0:
+            blended_scores = [
+                score - boilerplate_penalty if is_bad else score
+                for score, is_bad in zip(blended_scores, mask)
+            ]
+
+        return candidates, blended_scores
+
     def rerank(
         self,
         query: str,
         candidates: list[dict[str, Any]],
         top_k: int | None = None,
+        *,
+        vector_weight: float = 0.0,
+        boilerplate_penalty: float = 0.0,
+        boilerplate_filter: bool = False,
+        boilerplate_max_start: int = 1800,
+        min_candidates_after_filter: int = 5,
     ) -> list[dict[str, Any]]:
         if not candidates:
             return []
 
         pairs = [(query, str(candidate["text"])) for candidate in candidates]
         scores = self._model.predict(pairs)
-        rescored = self._to_candidates(candidates, scores)
+        candidates, blended_scores = self._apply_boilerplate_controls(
+            candidates=candidates,
+            rerank_scores=[float(score) for score in scores],
+            vector_weight=vector_weight,
+            boilerplate_penalty=boilerplate_penalty,
+            boilerplate_filter=boilerplate_filter,
+            boilerplate_max_start=boilerplate_max_start,
+            min_candidates_after_filter=min_candidates_after_filter,
+        )
+        rescored = self._to_candidates(candidates, blended_scores)
         if top_k is None:
             return rescored
         return rescored[:top_k]
@@ -74,6 +172,12 @@ class BaseReranker:
         candidate_lists: list[list[dict[str, Any]]],
         top_k: int | None = None,
         batch_size: int = 64,
+        *,
+        vector_weight: float = 0.0,
+        boilerplate_penalty: float = 0.0,
+        boilerplate_filter: bool = False,
+        boilerplate_max_start: int = 1800,
+        min_candidates_after_filter: int = 5,
     ) -> list[list[dict[str, Any]]]:
         if len(queries) != len(candidate_lists):
             raise ValueError("queries and candidate_lists must have the same length")
@@ -101,6 +205,18 @@ class BaseReranker:
         start = 0
         for count in pair_counts:
             subset = flat_rescored[start : start + count]
+            original_candidates = candidate_lists[len(reranked_lists)]
+            original_scores = [float(item["score"]) for item in subset]
+            controlled_candidates, controlled_scores = self._apply_boilerplate_controls(
+                candidates=original_candidates,
+                rerank_scores=original_scores,
+                vector_weight=vector_weight,
+                boilerplate_penalty=boilerplate_penalty,
+                boilerplate_filter=boilerplate_filter,
+                boilerplate_max_start=boilerplate_max_start,
+                min_candidates_after_filter=min_candidates_after_filter,
+            )
+            subset = self._to_candidates(controlled_candidates, controlled_scores, sort_desc=False)
             subset.sort(key=lambda item: item["score"], reverse=True)
             if top_k is not None:
                 subset = subset[:top_k]
@@ -186,12 +302,27 @@ class LoraReranker:
         query: str,
         candidates: list[dict[str, Any]],
         top_k: int | None = None,
+        *,
+        vector_weight: float = 0.0,
+        boilerplate_penalty: float = 0.0,
+        boilerplate_filter: bool = False,
+        boilerplate_max_start: int = 1800,
+        min_candidates_after_filter: int = 5,
     ) -> list[dict[str, Any]]:
         if not candidates:
             return []
         pairs = [(query, str(candidate["text"])) for candidate in candidates]
         scores = self._predict(pairs)
-        rescored = BaseReranker._to_candidates(candidates, scores)
+        candidates, blended_scores = BaseReranker._apply_boilerplate_controls(
+            candidates=candidates,
+            rerank_scores=[float(score) for score in scores],
+            vector_weight=vector_weight,
+            boilerplate_penalty=boilerplate_penalty,
+            boilerplate_filter=boilerplate_filter,
+            boilerplate_max_start=boilerplate_max_start,
+            min_candidates_after_filter=min_candidates_after_filter,
+        )
+        rescored = BaseReranker._to_candidates(candidates, blended_scores)
         if top_k is None:
             return rescored
         return rescored[:top_k]
@@ -202,6 +333,12 @@ class LoraReranker:
         candidate_lists: list[list[dict[str, Any]]],
         top_k: int | None = None,
         batch_size: int = 64,
+        *,
+        vector_weight: float = 0.0,
+        boilerplate_penalty: float = 0.0,
+        boilerplate_filter: bool = False,
+        boilerplate_max_start: int = 1800,
+        min_candidates_after_filter: int = 5,
     ) -> list[list[dict[str, Any]]]:
         if len(queries) != len(candidate_lists):
             raise ValueError("queries and candidate_lists must have the same length")
@@ -224,6 +361,18 @@ class LoraReranker:
         start = 0
         for count in pair_counts:
             subset = flat_rescored[start : start + count]
+            original_candidates = candidate_lists[len(reranked_lists)]
+            original_scores = [float(item["score"]) for item in subset]
+            controlled_candidates, controlled_scores = BaseReranker._apply_boilerplate_controls(
+                candidates=original_candidates,
+                rerank_scores=original_scores,
+                vector_weight=vector_weight,
+                boilerplate_penalty=boilerplate_penalty,
+                boilerplate_filter=boilerplate_filter,
+                boilerplate_max_start=boilerplate_max_start,
+                min_candidates_after_filter=min_candidates_after_filter,
+            )
+            subset = BaseReranker._to_candidates(controlled_candidates, controlled_scores, sort_desc=False)
             subset.sort(key=lambda item: item["score"], reverse=True)
             if top_k is not None:
                 subset = subset[:top_k]

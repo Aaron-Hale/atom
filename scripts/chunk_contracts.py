@@ -23,8 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("data/contracts.jsonl"))
     parser.add_argument("--output", type=Path, default=Path("data/chunks.jsonl"))
-    parser.add_argument("--chunk-size", type=int, default=1200)
-    parser.add_argument("--chunk-overlap", type=int, default=200)
+    parser.add_argument("--chunk-size", type=int, default=900)
+    parser.add_argument("--chunk-overlap", type=int, default=250)
     return parser.parse_args()
 
 
@@ -64,7 +64,7 @@ def chunk_document(doc_id: str, text: str, chunk_size: int, chunk_overlap: int) 
 
 
 def chunk_contracts(
-    input_path: Path, output_path: Path, chunk_size: int = 1200, chunk_overlap: int = 200
+    input_path: Path, output_path: Path, chunk_size: int = 900, chunk_overlap: int = 250
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0

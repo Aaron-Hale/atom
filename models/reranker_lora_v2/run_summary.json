@@ -1,0 +1,65 @@
+{
+  "base_model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+  "eval_metrics": {
+    "epoch": 1.0,
+    "eval_accuracy": 0.9585492227979274,
+    "eval_f1": 0.9414225941422594,
+    "eval_loss": 0.15079279243946075,
+    "eval_precision": 0.9440559440559441,
+    "eval_recall": 0.9388038942976356,
+    "eval_runtime": 52.0569,
+    "eval_samples_per_second": 77.857,
+    "eval_steps_per_second": 2.44
+  },
+  "lora": {
+    "alpha": 32,
+    "dropout": 0.1,
+    "modules_to_save": [
+      "classifier",
+      "classifier",
+      "score"
+    ],
+    "r": 16,
+    "target_modules": [
+      "query",
+      "value"
+    ]
+  },
+  "save_load_parity_check": {
+    "allclose": true,
+    "atol": 1e-05,
+    "batch_size": 32,
+    "enabled": true,
+    "max_abs_logit_diff": 0.0,
+    "mean_abs_logit_diff": 0.0,
+    "p95_abs_logit_diff": 0.0,
+    "rtol": 0.0001,
+    "slice_size": 128
+  },
+  "seed": 42,
+  "smoke_run": false,
+  "timestamp_utc": "2026-03-08T21:51:21.301179+00:00",
+  "train_file": "data/rerank_train_v2.jsonl",
+  "train_metrics": {
+    "epoch": 1.0,
+    "total_flos": 215986046414208.0,
+    "train_loss": 0.4429360619693432,
+    "train_runtime": 797.488,
+    "train_samples_per_second": 16.996,
+    "train_steps_per_second": 1.063
+  },
+  "train_samples": 13554,
+  "training": {
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 0.0002,
+    "max_length": 512,
+    "metric_threshold": 0.5,
+    "num_train_epochs": 1.0,
+    "per_device_eval_batch_size": 32,
+    "per_device_train_batch_size": 16,
+    "warmup_ratio": 0.05,
+    "weight_decay": 0.01
+  },
+  "val_file": "data/rerank_val_v2.jsonl",
+  "val_samples": 4053
+}

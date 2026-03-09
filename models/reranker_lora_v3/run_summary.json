@@ -1,0 +1,64 @@
+{
+  "base_model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+  "eval_metrics": {
+    "epoch": 1.0,
+    "eval_loss": 0.03562207892537117,
+    "eval_pairwise_accuracy": 0.9518072289156626,
+    "eval_runtime": 41.1482,
+    "eval_samples_per_second": 42.359,
+    "eval_steps_per_second": 1.337
+  },
+  "lora": {
+    "alpha": 32,
+    "dropout": 0.1,
+    "modules_to_save": [
+      "classifier",
+      "classifier",
+      "score"
+    ],
+    "r": 16,
+    "target_modules": [
+      "query",
+      "value"
+    ]
+  },
+  "save_load_parity_check": {
+    "allclose": true,
+    "atol": 1e-05,
+    "batch_size": 32,
+    "enabled": true,
+    "max_abs_logit_diff": 0.0,
+    "mean_abs_logit_diff": 0.0,
+    "p95_abs_logit_diff": 0.0,
+    "rtol": 0.0001,
+    "slice_size": 128
+  },
+  "seed": 42,
+  "smoke_run": false,
+  "timestamp_utc": "2026-03-08T23:08:18.203071+00:00",
+  "train_file": "data/rerank_train_pairwise_v3.jsonl",
+  "train_metrics": {
+    "epoch": 1.0,
+    "total_flos": 0.0,
+    "train_loss": 0.11703391458423001,
+    "train_runtime": 636.9819,
+    "train_samples_per_second": 9.211,
+    "train_steps_per_second": 0.576
+  },
+  "train_objective": "pairwise",
+  "train_samples": 5867,
+  "training": {
+    "gradient_accumulation_steps": 1,
+    "learning_rate": 0.0002,
+    "max_length": 512,
+    "metric_threshold": 0.5,
+    "num_train_epochs": 1.0,
+    "pairwise_margin": 0.2,
+    "per_device_eval_batch_size": 32,
+    "per_device_train_batch_size": 16,
+    "warmup_ratio": 0.05,
+    "weight_decay": 0.01
+  },
+  "val_file": "data/rerank_val_pairwise_v3.jsonl",
+  "val_samples": 1743
+}

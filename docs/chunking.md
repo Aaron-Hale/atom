@@ -1,4 +1,4 @@
-# Contract Chunking Policy (Day 5)
+# Contract Chunking Policy (Day 12)
 
 ATOM uses deterministic fixed-size character chunking over `data/contracts.jsonl`:
 
@@ -12,9 +12,9 @@ ATOM uses deterministic fixed-size character chunking over `data/contracts.jsonl
 
 ## Parameters
 
-- `chunk_size = 1200`
-- `chunk_overlap = 200`
-- `step = chunk_size - chunk_overlap = 1000`
+- `chunk_size = 900`
+- `chunk_overlap = 250`
+- `step = chunk_size - chunk_overlap = 650`
 
 ## Offset policy
 
@@ -25,6 +25,18 @@ ATOM uses deterministic fixed-size character chunking over `data/contracts.jsonl
   - `text = text[start:end]`
 - Chunking stops when a chunk reaches `end == len(text)`.
 - Character offsets are exact; chunk text is always the original source slice.
+
+## Embedding Representation
+
+- Raw chunk data remains offset-preserving:
+  - `text = text[start:end]` is unchanged and is retained in metadata for evidence.
+- During index build, embedding input text is enriched deterministically as:
+  - `Document Title: <title cue>`
+  - `Section Heading: <heading>` (when a simple uppercase-like heading is found in-chunk)
+  - `Chunk Text: <raw chunk text>`
+- Title cue is extracted from each source contract deterministically using early header lines.
+- Heading cue is extracted from early lines inside each chunk and used only for embeddings.
+- Enriched text is used for vector encoding only; retrieval outputs still return raw chunk text and exact offsets.
 
 ## Deterministic IDs
 
