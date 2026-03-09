@@ -70,3 +70,14 @@
 - Trained and saved `models/clause_binary_lora/` and recorded run metrics/commands.
 - Compared lexical baseline vs non-fine-tuned pretrained vs LoRA with PR-AUC, ROC-AUC, F1, precision, recall, plus per-clause positive-class metrics and macro averages.
 - Outcome: this binary setup produced a clear LoRA win over both baselines.
+
+## Day 14
+- Added a local demo script for clause-conditioned binary inference at `scripts/run_clause_binary_demo.py`.
+- The demo loads `models/clause_binary_lora/` and supports both direct text input and text-file input with a clause type prompt.
+- Output now includes predicted probability, predicted yes/no label, model path used, and clause type used.
+- Added quick-start usage docs in `docs/clause_binary_demo.md` and linked demo usage in `README.md`.
+
+## Day 15
+- Fixed demo loading so it infers classifier output size from `models/clause_binary_lora/adapter_model.safetensors` before attaching LoRA.
+- Removed classifier head size-mismatch warnings (`classifier.weight` / `classifier.bias`) in normal clause-binary demo inference usage.
+- Preserved CLI behavior and output fields for both direct text and text-file modes.

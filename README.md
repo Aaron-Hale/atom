@@ -105,6 +105,27 @@ This supports a strong portfolio claim:
 
 > Built a clause-conditioned legal chunk detector and fine-tuned a LoRA adapter that improved PR-AUC, ROC-AUC, and F1 over lexical and non-fine-tuned baselines on held-out contract data.
 
+### Demo / Inference
+
+Run local inference with the saved LoRA artifact:
+
+```bash
+python scripts/run_clause_binary_demo.py \
+  --clause-type assignment \
+  --text "Neither party may assign this Agreement without prior written consent..."
+```
+
+File-input mode:
+
+```bash
+python scripts/run_clause_binary_demo.py \
+  --clause-type assignment \
+  --text-file /path/to/snippet.txt
+```
+
+See `docs/clause_binary_demo.md` for quick usage details.
+The demo infers the classifier head size from the saved binary LoRA artifact so it can load cleanly without classifier weight/bias mismatch warnings.
+
 ---
 
 ## Reranker track summary
@@ -190,6 +211,7 @@ That result is still useful because it demonstrates:
 ### LoRA binary detector artifacts
 
 - `scripts/build_clause_binary_dataset.py`
+- `scripts/run_clause_binary_demo.py`
 - `train/train_clause_binary_lora.py`
 - `eval/eval_clause_binary_lora.py`
 - `data/clause_binary_train.jsonl`
@@ -197,6 +219,7 @@ That result is still useful because it demonstrates:
 - `models/clause_binary_lora/`
 - `docs/train_log_clause_binary_lora.md`
 - `docs/report_clause_binary_lora.md`
+- `docs/clause_binary_demo.md`
 
 ---
 
